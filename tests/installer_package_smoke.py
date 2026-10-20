@@ -29,7 +29,7 @@ def main():
     work = ROOT / 'build' / ('setup-check-' + uuid.uuid4().hex[:8])
     work.mkdir(parents=True)
     payload = work / 'Extracted Caf\u00e9 & setup'
-    installer = ROOT / 'build/dist/LibraryShare-0.3.0-alpha.1-Setup.exe'
+    installer = ROOT / 'build/dist/LibraryShare-0.3.0-alpha.2-Setup.exe'
     subprocess.run([str(installer), '--extract-only', str(payload)], check=True, timeout=10)
     assert subprocess.run([str(installer), '--extract-only', str(payload)], timeout=10).returncode != 0, 'Extraction overwrote a nonempty folder'
     files = [p for p in payload.rglob('*') if p.is_file()]

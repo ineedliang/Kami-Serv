@@ -64,11 +64,17 @@ app.MapGet("/local", async (HttpContext context) =>
     try
     {
         var query = context.Request.Query;
+        MediaEntry? subtitleVideo = null;
         if (action == "settings")
             preparation.Save(new(query["audio"].ToString(), query["position"].ToString(), int.Parse(query["offset"].ToString()),
                 query["font"].ToString().Trim(), int.Parse(query["size"].ToString()), query["bold"] == "true",
                 query["color"].ToString().Trim().TrimStart('#').ToUpperInvariant(), int.Parse(query["outline"].ToString())));
-        else if (action == "prepare") preparation.Start(query["id"].ToString(), query["burn"] == "true", int.Parse(query["subtitle"].ToString()), query["full"] == "true");
+        else if (action == "prepare") preparation.Start(query["id"].ToString(), query["burn"] == "true", int.Parse(query["subtitle"].ToString()), query["full"] == "true", query["sidecar"].ToString());
+        else if (action == "subtitles")
+        {
+            if (!library.Snapshot.Entries.TryGetValue(query["id"].ToString(), out subtitleVideo) || subtitleVideo.Mime?.StartsWith("video/", StringComparison.Ordinal) != true)
+                throw new ArgumentException("Select a shared video first.");
+        }
         else if (action is "pick-folder" or "pick-icon") preparation.Pick(action[5..]);
         else if (action == "picker-wait")
         {
@@ -119,6 +125,9 @@ app.MapGet("/local", async (HttpContext context) =>
                     new XElement("folderDisplay", $"{(folder.Label.Length == 0 ? new DirectoryInfo(f).Name : folder.Label)} [{folder.MediaType}] — {f}") }; })),
             new XElement("videos", snapshot.Entries.Values.Where(e => !e.IsFolder && e.Mime!.StartsWith("video/", StringComparison.Ordinal)).Take(500)
                 .SelectMany(e => new[] { new XElement("videoId", e.Id), new XElement("videoTitle", e.Title) })),
+            subtitleVideo is null ? null : new XElement("sidecars", subtitleVideo.Subtitles.SelectMany(s => new[] {
+                new XElement("sidecarId", s.Id), new XElement("sidecarName", s.Name), new XElement("sidecarLanguage", s.Language) })),
+            subtitleVideo is null ? null : new XElement("subtitleMessage", $"{subtitleVideo.Subtitles.Length} matching SRT file(s). Choose a subtitle source below."),
             new XElement("warnings", library.ScanWarnings.Select(w => new XElement("warning", w))),
             new XElement("transfers", library.Transfers.Values.Select(t => new XElement("transfer",
                 $"ACTIVE | {t.Client}: {t.Title} [{t.Method} {t.Range}]"))),
@@ -153,14 +162,24 @@ app.MapPost("/upnp/{service}/control", async (HttpContext context, string servic
 app.MapMethods("/upnp/{service}/event", ["SUBSCRIBE", "UNSUBSCRIBE"], (HttpContext context, string service) =>
     service is "content" or "connection" ? events.Handle(context, service) : Results.NotFound());
 
-app.MapMethods("/media/{id}/{name}", ["GET", "HEAD"], async (HttpContext context, string id) =>
+app.MapMethods("/media/{id}/{name}", ["GET", "HEAD"], async (HttpContext context, string id, string name) =>
 {
     if (!library.Config.Enabled) { context.Response.StatusCode = 503; return; }
     if (!library.Snapshot.Entries.TryGetValue(id, out var entry) || entry.IsFolder)
     { context.Response.StatusCode = 404; return; }
+    SubtitleFile? subtitle = null;
+    if (Path.GetExtension(name).Equals(".srt", StringComparison.OrdinalIgnoreCase))
+    {
+        subtitle = entry.Subtitles.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (subtitle is null) { context.Response.StatusCode = 404; return; }
+    }
+    var path = subtitle?.Path ?? entry.Path!;
+    var root = subtitle?.Root ?? entry.Root!;
     try
     {
-        if (Library.HasReparsePoint(entry.Path!, entry.Root!) || !File.Exists(entry.Path))
+        if (Library.HasReparsePoint(entry.Path!, entry.Root!) || Library.HasReparsePoint(path, root) || !File.Exists(entry.Path) || !File.Exists(path))
+        { context.Response.StatusCode = 404; return; }
+        if (subtitle is not null && new FileInfo(path).Length is <= 0 or > 16 * 1024 * 1024)
         { context.Response.StatusCode = 404; return; }
     }
     catch (Exception e) when (e is IOException or UnauthorizedAccessException)
@@ -169,11 +188,12 @@ app.MapMethods("/media/{id}/{name}", ["GET", "HEAD"], async (HttpContext context
     { context.Response.StatusCode = 503; context.Response.Headers.RetryAfter = "2"; return; }
     var transferId = Guid.NewGuid().ToString("N");
     using var stopTransfer = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, app.Lifetime.ApplicationStopping);
-    void StopIfDisabled() { if (!library.Config.Enabled || !library.Snapshot.Entries.ContainsKey(id)) stopTransfer.Cancel(); }
+    void StopIfDisabled() { if (!library.Config.Enabled || !library.Snapshot.Entries.TryGetValue(id, out var current) ||
+        subtitle is not null && !current.Subtitles.Any(s => s.Id == subtitle.Id)) stopTransfer.Cancel(); }
     library.Changed += StopIfDisabled;
-    var transfer = new Transfer(transferId, context.Connection.RemoteIpAddress!.ToString(), entry.Title,
+    var transfer = new Transfer(transferId, context.Connection.RemoteIpAddress!.ToString(), subtitle?.Name ?? entry.Title,
         context.Request.Headers.Range.ToString() is { Length: > 0 } range ? range : "whole file", DateTime.UtcNow,
-        context.Request.Method, id);
+        context.Request.Method, subtitle is null ? id : id + ":" + subtitle.Id);
     library.Transfers[transferId] = transfer;
     var outcome = "response finished";
     var previousAbort = context.RequestAborted;
@@ -182,12 +202,17 @@ app.MapMethods("/media/{id}/{name}", ["GET", "HEAD"], async (HttpContext context
     {
         StopIfDisabled();
         if (stopTransfer.IsCancellationRequested) { context.Response.StatusCode = 503; return; }
-        context.Response.Headers["contentFeatures.dlna.org"] = Upnp.Features;
-        context.Response.Headers["transferMode.dlna.org"] = "Streaming";
+        if (subtitle is null)
+        {
+            context.Response.Headers["contentFeatures.dlna.org"] = Upnp.Features;
+            context.Response.Headers["transferMode.dlna.org"] = "Streaming";
+            if (entry.Subtitles.FirstOrDefault() is { } primary)
+                context.Response.Headers["CaptionInfo.sec"] = Upnp.SubtitleUrl(options.BaseUrl, entry, primary);
+        }
         // Kestrel's file result implements independent byte ranges, HEAD, 206/416,
         // Last-Modified, and cancellation; playback positions never live in global state.
-        await Results.File(entry.Path!, entry.Mime, enableRangeProcessing: true,
-            lastModified: File.GetLastWriteTimeUtc(entry.Path!)).ExecuteAsync(context);
+        await Results.File(path, subtitle is null ? entry.Mime : "text/srt", enableRangeProcessing: true,
+            lastModified: File.GetLastWriteTimeUtc(path)).ExecuteAsync(context);
     }
     catch (OperationCanceledException) when (stopTransfer.IsCancellationRequested) { outcome = "interrupted"; context.Abort(); }
     catch (IOException) { outcome = "interrupted"; context.Abort(); }

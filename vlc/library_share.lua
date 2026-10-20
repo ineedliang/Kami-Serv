@@ -1,13 +1,14 @@
 -- VLC 3 desktop extension. The helper keeps TV playback independent of VLC's playlist.
 function descriptor()
-    return { title = "Share Library", version = "0.3.0-alpha.1", author = "Library Share Project",
+    return { title = "Share Library", version = "0.3.0-alpha.2", author = "Library Share Project",
         shortdesc = "Share your library with TVs", description = "Manage your media server, folders and TV playback preferences.", capabilities = {} }
 end
 
 local dialog, status_label, firewall_label, connection, page
 local folder_input, label_input, type_input, folder_list, transfer_list, video_list
 local name_input, icon_input, audio_input, position_input, offset_input, font_input, size_input, bold_input, color_input, outline_input
-local burn_input, subtitle_input
+local burn_input, subtitle_input, sidecar_input, sidecar_video
+local sidecars = {}
 local state, folders, videos = {}, {}, {}
 local media_types = {"all", "video", "audio", "image"}
 local media_labels = {"All media", "Video", "Music", "Photos"}
@@ -62,8 +63,8 @@ local function request(action, parameters, preserve_fields)
     local xml_stream = vlc.memory_stream(response)
     local reader = vlc.xml():create_reader(xml_stream)
     local tag, error_message = "", nil
-    local new_state, new_folders, new_videos = {transfers = {}}, {}, {}
-    local folder, video
+    local new_state, new_folders, new_videos = {transfers = {}, sidecars = {}}, {}, {}
+    local folder, video, sidecar
     while true do
         local kind, value = reader:next_node()
         if not kind or kind <= 0 then break end
@@ -77,13 +78,16 @@ local function request(action, parameters, preserve_fields)
             elseif tag == "folderDisplay" and folder then folder.display = value
             elseif tag == "videoId" then video = {id = value}; new_videos[#new_videos+1] = video
             elseif tag == "videoTitle" and video then video.title = value
+            elseif tag == "sidecarId" then sidecar = {id = value}; new_state.sidecars[#new_state.sidecars+1] = sidecar
+            elseif tag == "sidecarName" and sidecar then sidecar.name = value
             elseif tag == "transfer" or tag == "recentTransfer" or tag == "warning" then new_state.transfers[#new_state.transfers+1] = value
             else new_state[tag] = value end
         end
     end
     if error_message then show_message(error_message); return false end
     state, folders, videos = new_state, new_folders, new_videos
-    if preserve_fields == "firewall" then
+    if preserve_fields == "subtitles" then show_message(state.subtitleMessage or "Subtitle choices loaded.")
+    elseif preserve_fields == "firewall" then
         show_message(state.firewallMessage or "Checking Windows Firewall...")
         if firewall_label then firewall_label:set_text(escape(state.firewallMessage or "")) end
     elseif preserve_fields then show_message(state.pickerMessage or "Opening chooser...")
@@ -153,6 +157,20 @@ function save_playback()
         offset = offset_input:get_text(), font = font_input:get_text(), size = size_input:get_text(), bold = tostring(bold_input:get_checked()),
         color = color_input:get_text(), outline = outline_input:get_text()})
 end
+function load_subtitles()
+    local selected = nil
+    for id, _ in pairs(video_list:get_selection()) do
+        if selected then show_message("Choose one video at a time."); return end
+        selected = videos[id]
+    end
+    if not selected then show_message("Select a video first."); return end
+    if not request("subtitles", {id = selected.id}, "subtitles") then return end
+    sidecars, sidecar_video = state.sidecars, selected.id
+    local values, labels = {"embedded"}, {"Embedded track (index above)"}
+    for _, srt in ipairs(sidecars) do values[#values+1] = srt.id; labels[#labels+1] = srt.name end
+    sidecar_input = dropdown(sidecar_input, values, labels, "embedded", 2, 11, 3)
+    dialog:update()
+end
 local function prepare(full)
     local selected = nil
     for id, _ in pairs(video_list:get_selection()) do
@@ -160,7 +178,9 @@ local function prepare(full)
         selected = videos[id]
     end
     if not selected then show_message("Select a video first."); return end
-    request("prepare", {id = selected.id, burn = tostring(burn_input:get_checked()), subtitle = subtitle_input:get_text(), full = tostring(full)})
+    local srt = sidecars[(sidecar_input:get_value() or 1)-1]
+    if srt and sidecar_video ~= selected.id then show_message("The video selection changed. Load SRTs for this video first."); return end
+    request("prepare", {id = selected.id, burn = tostring(burn_input:get_checked()), subtitle = srt and "0" or subtitle_input:get_text(), full = tostring(full), sidecar = srt and srt.id or ""})
 end
 function prepare_preview() prepare(false) end
 function prepare_full() prepare(true) end
@@ -171,6 +191,7 @@ function show_page(selected)
     folder_input, label_input, type_input, folder_list, transfer_list, video_list = nil, nil, nil, nil, nil, nil
     icon_input = nil
     firewall_label = nil
+    sidecar_input, sidecar_video, sidecars = nil, nil, {}
     dialog = vlc.dialog("Share Library")
     status_label = dialog:add_label("Connecting...", 1, 1, 4, 1)
     dialog:add_button("Library folders", function() show_page("library") end, 1, 2)
@@ -231,9 +252,12 @@ function show_page(selected)
         burn_input = dialog:add_check_box("Burn subtitles into video", false, 1, 9, 2, 1)
         dialog:add_label("Subtitle track (0 = first):", 3, 9)
         subtitle_input = dialog:add_text_input("0", 4, 9)
-        dialog:add_button("Prepare & share 2 min preview", prepare_preview, 1, 10, 2, 1)
-        dialog:add_button("Prepare & share full file", prepare_full, 3, 10, 2, 1)
-        dialog:add_label("Refresh to see completion. Finished files appear under Prepared for TV.<br/>Audio preference uses existing English tracks; it does not change channel count.<br/>Burn-in re-encodes video. Original files are kept intact.", 1, 11, 4, 1)
+        dialog:add_button("Load SRTs for selected video", load_subtitles, 1, 10, 4, 1)
+        dialog:add_label("Subtitle source:", 1, 11)
+        sidecar_input = dropdown(nil, {"embedded"}, {"Embedded track (index above)"}, "embedded", 2, 11, 3)
+        dialog:add_button("Prepare & share 2 min preview", prepare_preview, 1, 12, 2, 1)
+        dialog:add_button("Prepare & share full file", prepare_full, 3, 12, 2, 1)
+        dialog:add_label("Refresh to see completion. Finished files appear under Prepared for TV.<br/>Selected SRT: copied beside the MKV, or burned in when checked.<br/>Burn-in re-encodes video. Original files are kept intact.", 1, 13, 4, 1)
     end
     update_fields()
     refresh_status()

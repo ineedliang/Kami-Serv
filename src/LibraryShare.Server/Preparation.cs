@@ -111,11 +111,15 @@ public sealed class Preparation(ServerOptions options, Library library, Cancella
             Path.Combine(options.ProjectDirectory, "scripts", "import-icon.ps1"), "-Source", Path.GetFullPath(source), "-Destination", destination), cancellation);
         return new(destination, "image/png", 256, 256, 32);
     }
-    public void Start(string id, bool burn, int subtitle, bool full)
+    public void Start(string id, bool burn, int subtitle, bool full, string sidecarId = "")
     {
         if (!library.Snapshot.Entries.TryGetValue(id, out var source) || source.IsFolder || source.Mime?.StartsWith("video/", StringComparison.Ordinal) != true ||
             Library.HasReparsePoint(source.Path!, source.Root!)) throw new ArgumentException("Select a shared video file.");
         if (subtitle is < 0 or > 99) throw new ArgumentException("Subtitle index must be 0–99.");
+        var sidecar = sidecarId.Length == 0 ? null : source.Subtitles.FirstOrDefault(s => s.Id == sidecarId)
+            ?? throw new ArgumentException("That SRT is not associated with the selected video. Reload its subtitle choices.");
+        if (sidecar is not null && (Library.HasReparsePoint(sidecar.Path, sidecar.Root) || !File.Exists(sidecar.Path)))
+            throw new ArgumentException("The selected SRT is unavailable. Rescan the library.");
         PlaybackSettings settings;
         lock (gate)
         {
@@ -132,8 +136,18 @@ public sealed class Preparation(ServerOptions options, Library library, Cancella
                 File.WriteAllText(config, JsonSerializer.Serialize(settings));
                 var output = Path.Combine(work, "output.mkv");
                 var jobFile = Path.Combine(work, "job.json");
+                string? copiedSubtitle = null;
+                if (sidecar is not null)
+                {
+                    if (Library.HasReparsePoint(sidecar.Path, sidecar.Root)) throw new IOException("The selected SRT is no longer a regular shared file.");
+                    copiedSubtitle = Path.Combine(work, "selected.srt");
+                    await using var input = new FileStream(sidecar.Path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    if (input.Length is <= 0 or > 16 * 1024 * 1024) throw new IOException("SRT files must be nonempty and at most 16 MiB.");
+                    await using var destination = new FileStream(copiedSubtitle, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    await input.CopyToAsync(destination, shutdown);
+                }
                 var job = new PreparationJob(source.Path!, output, Environment.GetEnvironmentVariable("VLC_DIR") ?? @"C:\Program Files\VideoLAN\VLC",
-                    settings, burn, subtitle, full ? null : 120);
+                    settings, burn, subtitle, full ? null : 120, ExternalSubtitle: burn ? copiedSubtitle : null);
                 await File.WriteAllTextAsync(jobFile, JsonSerializer.Serialize(job), shutdown);
                 var start = Command(Environment.ProcessPath!, "--prepare-worker", jobFile);
                 if (string.Equals(Path.GetFileNameWithoutExtension(Environment.ProcessPath), "dotnet", StringComparison.OrdinalIgnoreCase))
@@ -141,13 +155,27 @@ public sealed class Preparation(ServerOptions options, Library library, Cancella
                 await Run(start, shutdown);
                 shutdown.ThrowIfCancellationRequested();
                 if (!library.Snapshot.Entries.ContainsKey(id)) throw new IOException("Source was removed from sharing; output was not published.");
+                if (sidecar is not null && !library.Snapshot.Entries[id].Subtitles.Any(s => s.Id == sidecar.Id))
+                    throw new IOException("Selected SRT was removed from sharing; output was not published.");
                 var folder = Path.Combine(Path.GetDirectoryName(settingsFile)!, "Prepared Media");
                 Directory.CreateDirectory(folder);
                 var title = Path.GetFileNameWithoutExtension(source.Title);
                 if (title.Length > 90) title = title[..90];
                 var suffix = burn ? $"Captions {settings.SubtitlePosition}" : $"Audio {settings.AudioPreference}";
                 var target = Path.Combine(folder, $"{title} - {suffix} - {(full ? "Full" : "2 min")} - {DateTime.Now:HHmmss}-{Guid.NewGuid().ToString("N")[..4]}.mkv");
-                File.Move(output, target);
+                var targetSubtitle = copiedSubtitle is not null && !burn ? Path.ChangeExtension(target, ".srt") : null;
+                try
+                {
+                    // Publish captions first: a simultaneous rescan can never list
+                    // this completed video before its selected sidecar is ready.
+                    if (targetSubtitle is not null) File.Move(copiedSubtitle!, targetSubtitle);
+                    File.Move(output, target);
+                }
+                catch
+                {
+                    if (targetSubtitle is not null && File.Exists(targetSubtitle)) File.Delete(targetSubtitle);
+                    throw;
+                }
                 await library.Change("add", folder, shutdown, "Prepared for TV", "video");
                 lock (gate) status = "Ready in Prepared for TV: " + Path.GetFileName(target);
             }

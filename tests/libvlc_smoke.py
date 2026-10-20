@@ -89,7 +89,7 @@ def playback(vlc_dir, url):
         dll_context.close()
 
 
-def lua_api(vlc_dir, test, executable=None, extension_path=None, bootstrap=False, picker_tests=False, firewall_tests=False):
+def lua_api(vlc_dir, test, executable=None, extension_path=None, bootstrap=False, picker_tests=False, firewall_tests=False, srt_tests=False):
     variant = "portable" if executable else "installed"
     profile = test.work / ("isolated-appdata-" + variant)
     interfaces = profile / "vlc/lua/intf"
@@ -146,17 +146,47 @@ def lua_api(vlc_dir, test, executable=None, extension_path=None, bootstrap=False
     assert(inputs[settings_input+4].text == "37", "Icon chooser erased subtitle preferences")
     assert(inputs[settings_input+1].text == [[''' + media + '''/icon & test.png]], "Chosen icon did not automatically fill the input")
     ''' if picker_tests else ""
+    srt_prepare = '''
+    local video_widget = lists[#lists]
+    local selected_id, other_id
+    for id, title in pairs(video_widget.values) do
+        if title == "A & B.mp4" then selected_id = id else other_id = id end
+    end
+    assert(selected_id and other_id, "SRT test videos not listed")
+    video_widget.get_selection = function() return {[selected_id] = true} end
+    load_subtitles()
+    local source_dropdown = dropdowns[#dropdowns]
+    assert(source_dropdown.values[2] == "A & B.srt", "Matching SRT choices not populated")
+    source_dropdown.selected = 2
+    local original_stream = vlc.stream
+    local submitted = nil
+    vlc.stream = function(url)
+        if url:find("action=prepare", 1, true) then
+            submitted = url
+            return vlc.memory_stream("<library><summary>Sharing: ON</summary></library>")
+        end
+        return original_stream(url)
+    end
+    prepare_preview()
+    assert(submitted and submitted:find("sidecar=", 1, true), "SRT selection not submitted")
+    assert(not submitted:find("sidecar=&", 1, true) and not submitted:match("sidecar=$"), "Empty SRT selection")
+    video_widget.get_selection = function() return {[other_id] = true} end
+    submitted = nil
+    prepare_full()
+    assert(not submitted, "SRT selection from a different video was submitted")
+    vlc.stream = original_stream
+    ''' if srt_tests else ""
     script = f'''
 local function run()
     package.path = [[{modules}]] .. ";" .. package.path
-    local labels, inputs, lists = {{}}, {{}}, {{}}
+    local labels, inputs, lists, dropdowns = {{}}, {{}}, {{}}, {{}}
     local function widget(text)
         return {{ text = text, values = {{}}, checked = false,
             set_text = function(self, value) self.text = value end,
             get_text = function(self) return self.text end,
             clear = function(self) self.values = {{}}; self.first = nil end,
             add_value = function(self, text, id) self.values[id] = text; self.first = self.first or id end,
-            get_value = function(self) return self.first end,
+            get_value = function(self) return self.selected or self.first end,
             set_checked = function(self, value) self.checked = value end,
             get_checked = function(self) return self.checked end,
             get_selection = function(self) return {{}} end }}
@@ -168,7 +198,7 @@ local function run()
             add_button = function(self, text, callback, ...) assert(type(callback) == "function"); return widget(text) end,
             add_text_input = function(self, text, ...) local w = widget(text); inputs[#inputs+1] = w; return w end,
             add_list = function(self, ...) local w = widget(""); lists[#lists+1] = w; return w end,
-            add_dropdown = function(self, ...) return widget("") end,
+            add_dropdown = function(self, ...) local w = widget(""); dropdowns[#dropdowns+1] = w; return w end,
             add_check_box = function(self, text, checked, ...) local w = widget(text); w.checked = checked; return w end,
             update = function() end, delete = function() end, del_widget = function() end
         }}
@@ -203,6 +233,7 @@ local function run()
     save_playback()
     show_page("prepare")
     prepare_preview() -- No selection: must not launch a conversion.
+    {srt_prepare}
     show_page("library")
     deactivate()
     -- Closing only the panel must leave sharing available while VLC is alive.

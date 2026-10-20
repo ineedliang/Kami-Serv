@@ -105,7 +105,7 @@ internal sealed class SetupForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
         AddLabel("Library Share for VLC", 22, 18, 600, 34, new Font(Font.FontFamily, 20F, FontStyle.Bold));
-        AddLabel("Alpha 0.3.0 - Share selected media folders with your TVs, phones and tablets.", 24, 62, 600, 26, null);
+        AddLabel("Alpha 0.3.0 (SRT update) - Share selected media folders with your TVs, phones and tablets.", 24, 62, 600, 26, null);
         AddLabel("Requires 64-bit Windows 10/11, desktop VLC 3.x (64-bit),\r\nand the .NET 8 ASP.NET Core Runtime (x64).", 24, 92, 605, 43, null);
         AddLink("Get VLC", "https://www.videolan.org/vlc/", 24, 140, 115);
         AddLink("Get .NET 8 runtime", "https://dotnet.microsoft.com/en-us/download/dotnet/8.0", 150, 140, 165);

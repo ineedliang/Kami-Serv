@@ -7,7 +7,7 @@ using System.Text.Json;
 namespace LibraryShare;
 
 public sealed record PreparationJob(string Input, string Output, string VlcDirectory, PlaybackSettings Settings,
-    bool BurnSubtitles, int SubtitleTrack, double? Seconds, int TimeoutSeconds = 86400);
+    bool BurnSubtitles, int SubtitleTrack, double? Seconds, int TimeoutSeconds = 86400, string? ExternalSubtitle = null);
 
 // Runs in a separate copy of this executable. Native codec failures or cancellation
 // cannot take down the server; closing VLC cancels and kills this worker process.
@@ -39,6 +39,8 @@ public static class NativePreparation
             if (input.Equals(output, StringComparison.OrdinalIgnoreCase)) throw new IOException("Output must not replace the input file.");
             if (!File.Exists(input)) throw new FileNotFoundException("Source file is missing.");
             if (File.Exists(output)) throw new IOException("Output already exists; it will not be overwritten.");
+            if (job.ExternalSubtitle is { } external && (!File.Exists(external) || new FileInfo(external).Length is <= 0 or > 16 * 1024 * 1024))
+                throw new IOException("The selected SRT is missing, empty, or larger than 16 MiB.");
             if (job.SubtitleTrack is < 0 or > 99 || job.TimeoutSeconds is < 1 or > 86400 ||
                 job.Seconds is <= 0 || job.Seconds is { } seconds && !double.IsFinite(seconds)) throw new ArgumentException("Invalid preparation limits.");
             Directory.CreateDirectory(Path.GetDirectoryName(output)!);
@@ -76,7 +78,7 @@ public static class NativePreparation
     {
         var settings = job.Settings;
         var arguments = new List<string> { "--ignore-config", "--no-plugins-cache", "--no-media-library", "--no-metadata-network-access",
-            "--aout=dummy", "--vout=dummy", "--file-logging", "--logfile=" + job.Output + ".vlc.log", "--verbose=2" };
+            "--aout=dummy", "--vout=dummy", "--no-sub-autodetect-file", "--file-logging", "--logfile=" + job.Output + ".vlc.log", "--verbose=2" };
         if (job.BurnSubtitles)
         {
             var margin = settings.SubtitlePosition switch { "bottom" => -32768, "top" => 32768, _ => settings.SubtitleOffset };
@@ -92,8 +94,11 @@ public static class NativePreparation
         {
             media = libvlc_media_new_path(instance, job.Input);
             if (media == IntPtr.Zero) throw new IOException("VLC could not open the source media.");
+            if (job.BurnSubtitles && job.ExternalSubtitle is { } external &&
+                libvlc_media_slaves_add(media, 0, 4, new Uri(Path.GetFullPath(external)).AbsoluteUri) != 0)
+                throw new IOException("VLC could not load the selected SRT.");
             var tracks = await Inspect(media);
-            if (job.BurnSubtitles && !tracks.Any(track => track.Type == 2 && track.Index == job.SubtitleTrack))
+            if (job.BurnSubtitles && job.ExternalSubtitle is null && !tracks.Any(track => track.Type == 2 && track.Index == job.SubtitleTrack))
                 throw new IOException("The selected embedded subtitle track does not exist.");
             var selected = tracks.FirstOrDefault(track => track.Type == 0 &&
                 track.Language.ToLowerInvariant() is "en" or "eng" or "english" &&
@@ -108,7 +113,7 @@ public static class NativePreparation
             if (selected is not null) libvlc_media_add_option(media, ":audio-track=" + Number(selected.Index));
             if (job.BurnSubtitles)
             {
-                libvlc_media_add_option(media, ":sub-track=" + Number(job.SubtitleTrack));
+                if (job.ExternalSubtitle is null) libvlc_media_add_option(media, ":sub-track=" + Number(job.SubtitleTrack));
                 libvlc_media_add_option(media, ":spu");
                 libvlc_media_add_option(media, ":sout-spu");
             }
@@ -131,7 +136,7 @@ public static class NativePreparation
             foreach (var type in new[] { 0, 1 })
                 if (tracks.Any(track => track.Type == type) && !outputTracks.Any(track => track.Type == type))
                     throw new IOException("VLC output is missing " + (type == 0 ? "audio" : "video") + "; it will not be published.");
-            var result = new { Engine = "LibVLC via .NET", job.Input, job.Output, job.BurnSubtitles, job.SubtitleTrack, job.Seconds,
+            var result = new { Engine = "LibVLC via .NET", job.Input, job.Output, job.BurnSubtitles, job.SubtitleTrack, job.Seconds, job.ExternalSubtitle,
                 Settings = settings, SelectedAudio = selected, SourceTracks = tracks, OutputTracks = outputTracks,
                 Bytes = new FileInfo(job.Output).Length, ElapsedSeconds = timer.Elapsed.TotalSeconds };
             await File.WriteAllTextAsync(job.Output + ".result.json", JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
@@ -191,6 +196,7 @@ public static class NativePreparation
     [DllImport(Vlc, CallingConvention = CallingConvention.Cdecl)] private static extern void libvlc_release(IntPtr instance);
     [DllImport(Vlc, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr libvlc_media_new_path(IntPtr instance, [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
     [DllImport(Vlc, CallingConvention = CallingConvention.Cdecl)] private static extern void libvlc_media_add_option(IntPtr media, [MarshalAs(UnmanagedType.LPUTF8Str)] string option);
+    [DllImport(Vlc, CallingConvention = CallingConvention.Cdecl)] private static extern int libvlc_media_slaves_add(IntPtr media, int type, uint priority, [MarshalAs(UnmanagedType.LPUTF8Str)] string uri);
     [DllImport(Vlc, CallingConvention = CallingConvention.Cdecl)] private static extern void libvlc_media_release(IntPtr media);
     [DllImport(Vlc, CallingConvention = CallingConvention.Cdecl)] private static extern int libvlc_media_parse_with_options(IntPtr media, int flags, int timeout);
     [DllImport(Vlc, CallingConvention = CallingConvention.Cdecl)] private static extern int libvlc_media_get_parsed_status(IntPtr media);

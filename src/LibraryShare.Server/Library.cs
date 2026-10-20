@@ -23,7 +23,10 @@ public sealed record MediaEntry(string Id, string Parent, string Title, string? 
     string? Root, string? Mime, string MediaClass, long Size = 0)
 {
     public bool IsFolder => Mime is null;
+    public SubtitleFile[] Subtitles { get; init; } = [];
 }
+
+public sealed record SubtitleFile(string Id, string Name, string Path, string Root, long Size, string Language);
 
 public sealed record LibrarySnapshot(IReadOnlyDictionary<string, MediaEntry> Entries, uint UpdateId);
 public sealed record Transfer(string Id, string Client, string Title, string Range, DateTime Started,
@@ -191,18 +194,54 @@ public sealed class Library
                     directory.Path, root, null, "object.container.storageFolder");
                 try
                 {
+                    var videos = new List<MediaEntry>();
+                    var subtitles = new List<FileInfo>();
                     var options = new EnumerationOptions { IgnoreInaccessible = true,
                         AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System | FileAttributes.Hidden };
                     foreach (var child in new DirectoryInfo(directory.Path).EnumerateFileSystemInfos("*", options))
                     {
                         if ((child.Attributes & FileAttributes.Directory) != 0) stack.Push((child.FullName, id));
+                        else if (child is FileInfo caption && caption.Extension.Equals(".srt", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (caption.Length is > 0 and <= 16 * 1024 * 1024) subtitles.Add(caption);
+                        }
                         else if (child is FileInfo file && Formats.TryGetValue(file.Extension, out var format))
                         {
                             if (settings.MediaType != "all" && !format.Mime.StartsWith(settings.MediaType + "/", StringComparison.Ordinal)) continue;
                             var childId = EntryId(file.FullName);
                             entries[childId] = new(childId, id, file.Name, file.FullName, root,
                                 format.Mime, format.Class, file.Length);
+                            if (format.Mime.StartsWith("video/", StringComparison.Ordinal)) videos.Add(entries[childId]);
                         }
+                    }
+                    // Prefer the longest matching video stem: Movie.Part2.eng.srt
+                    // belongs to Movie.Part2, even if Movie.mp4 is in this folder.
+                    var ordered = videos.OrderByDescending(v => System.IO.Path.GetFileNameWithoutExtension(v.Title).Length).ToArray();
+                    var matched = new Dictionary<string, List<SubtitleFile>>();
+                    foreach (var subtitle in subtitles.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
+                    {
+                        var stem = System.IO.Path.GetFileNameWithoutExtension(subtitle.Name);
+                        var video = ordered.FirstOrDefault(v => stem.Equals(System.IO.Path.GetFileNameWithoutExtension(v.Title), StringComparison.OrdinalIgnoreCase) ||
+                            stem.StartsWith(System.IO.Path.GetFileNameWithoutExtension(v.Title) + ".", StringComparison.OrdinalIgnoreCase));
+                        if (video is null) continue;
+                        var suffix = stem[System.IO.Path.GetFileNameWithoutExtension(video.Title).Length..].TrimStart('.');
+                        var language = suffix.Split('.')[0].ToLowerInvariant();
+                        if (language.Length is < 2 or > 3 || !language.All(char.IsAsciiLetter)) language = "und";
+                        // Different containers with the same base name share the
+                        // same sidecars; a longer stem still takes precedence.
+                        foreach (var owner in ordered.Where(v => System.IO.Path.GetFileNameWithoutExtension(v.Title)
+                            .Equals(System.IO.Path.GetFileNameWithoutExtension(video.Title), StringComparison.OrdinalIgnoreCase)))
+                        {
+                            if (!matched.TryGetValue(owner.Id, out var list)) matched[owner.Id] = list = [];
+                            if (list.Count < 32) list.Add(new(EntryId(subtitle.FullName), subtitle.Name, subtitle.FullName, root, subtitle.Length, language));
+                        }
+                    }
+                    foreach (var video in videos)
+                    {
+                        if (!matched.TryGetValue(video.Id, out var list)) continue;
+                        entries[video.Id] = video with { Subtitles = list.OrderBy(s => System.IO.Path.GetFileNameWithoutExtension(s.Name)
+                            .Equals(System.IO.Path.GetFileNameWithoutExtension(video.Title), StringComparison.OrdinalIgnoreCase) ? 0 : s.Language is "en" or "eng" ? 1 : 2)
+                            .ThenBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ToArray() };
                     }
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)

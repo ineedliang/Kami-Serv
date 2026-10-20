@@ -19,7 +19,7 @@ no compiler installer was run. The build instead uses tools already on Windows:
 | Python 3.11+ | Existing developer installation | Development scripts/tests only; not distributed or required by the app |
 | ffprobe | `_kit\shared\ffmpeg\2026-08-17-full_build-gyan\ffprobe.exe` | Independent test output validation only |
 
-`build-installer.cmd` produces `build\dist\LibraryShare-0.3.0-alpha.1-Setup.exe`
+`build-installer.cmd` produces `build\dist\LibraryShare-0.3.0-alpha.2-Setup.exe`
 using an allowlist of release files. The setup program is built from
 `src\LibraryShare.Setup\Setup.cs` with an embedded ZIP and an `asInvoker` manifest.
 It installs per user; only the firewall command requests elevation. No Python,

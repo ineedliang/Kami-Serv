@@ -30,6 +30,8 @@ The extension has three pages:
 | **Server & playback** | Save the advertised server name/icon, choose audio and subtitle preferences, and check or repair Windows Firewall access. |
 | **Prepare for TV** | Select a shared video and prepare a short preview or a full-length MKV, optionally with burned-in subtitles. |
 
+For an external subtitle, select the video, click **Load SRTs for selected video**, then choose the actual filename under **Subtitle source**. The server validates the choice against that video's scanned sidecars; the interface cannot submit an arbitrary subtitle path.
+
 The panel sends authenticated commands to the helper over the PC's loopback interface. Playback devices cannot use these management endpoints over the LAN.
 
 ### The helper is the media server
@@ -82,10 +84,10 @@ The present interface performs preparation only when requested. It does not insp
 
 1. You choose a video from the shared library and request a two-minute preview or full-file preparation.
 2. The helper snapshots the saved playback preferences and creates a separate job directory under its app data.
-3. The worker inspects the input through LibVLC. A requested embedded subtitle track must exist before burn-in proceeds.
+3. The worker inspects the input through LibVLC. A requested embedded subtitle track must exist before burn-in proceeds. An explicitly selected SRT is first copied read-only from the source into the private job directory and attached to VLC for burn-in instead.
 4. VLC writes a new MKV. Burn-in uses H.264 video encoding; ordinary preparation remuxes the selected streams.
 5. After VLC completes and flushes the file, the worker inspects the result. A source containing audio or video must retain those stream types in the output.
-6. The helper checks that the source is still shared, moves the completed MKV into its prepared-media directory, and adds that directory as **Prepared for TV**.
+6. The helper checks that the source and selected sidecar are still shared, moves the completed MKV into its prepared-media directory, and adds that directory as **Prepared for TV**. If an SRT was selected without burn-in, its unchanged copy is placed beside the MKV with the matching output base name before the video is published.
 7. You refresh the client library and play the prepared version.
 
 The output inspection catches missing streams; it is not a full frame-by-frame integrity or device-compatibility guarantee. Failed or incomplete jobs are not published as finished prepared videos. Job logs and intermediate output can remain in the application's preparation directory for diagnosis.
@@ -106,11 +108,23 @@ Prepared outputs use the selected audio stream. Original-file delivery leaves tr
 
 Burn-in selects an embedded track by its zero-based index. The first subtitle track is `0`; a missing selection produces a preparation error.
 
+Alternatively, select a matching SRT filename. That selection overrides the embedded index. VLC's automatic local sidecar discovery is disabled inside the preparation worker, so a nearby unrelated subtitle is not silently chosen. With burn-in disabled, a selected SRT is copied alongside the finished MKV rather than muxed into it. With burn-in enabled, it becomes part of the video picture.
+
 Placement options include the bottom edge, top edge, or the file's authored position with an offset. For authored positioning, positive offsets move captions up and negative offsets move them down. The edge modes currently have no adjustable safe-area inset.
 
 Plain text subtitles can use font family, size, bold, color, and outline preferences. Bitmap captions already contain their lettering as images, so font controls cannot redraw their characters. Styled ASS subtitles may retain their authored styling. These differences are properties of subtitle rendering, not missing audio/video tracks.
 
 Once captions are burned into a prepared video, a client cannot switch them off as a separate subtitle stream. The source file remains available unchanged.
+
+### Direct SRT delivery
+
+The scan associates same-folder `.srt` files by base name, including language-tagged names such as `Movie.eng.srt`. It chooses the longest matching video base name when filenames overlap: `Movie.Part2.eng.srt` belongs to `Movie.Part2`, rather than `Movie`. A plain same-name subtitle takes first place, then English-tagged files, then the remaining names in alphabetical order. Videos with the same base name in different containers share the same sidecars; give different cuts distinct base names if they need different captions.
+
+Sidecars stay attached to the video entry, so they do not inflate the library with standalone subtitle items. Each video advertises the SRT resources as `text/srt`, along with a primary caption link using Samsung `CaptionInfo`/`CaptionInfoEx` and PacketVideo subtitle attributes. Media responses also include the primary `CaptionInfo.sec` header. These are compatibility mechanisms used by existing players, not a guarantee that every television will offer a subtitle menu. See [VLC's UPnP reader](https://github.com/videolan/vlc/blob/3.0.x/modules/services_discovery/upnp.cpp) and [Jellyfin's DLNA metadata builder](https://github.com/jellyfin/jellyfin-plugin-dlna/blob/master/src/Jellyfin.Plugin.Dlna/Didl/DidlBuilder.cs) for the corresponding client/server conventions.
+
+SRT requests support GET, HEAD and byte ranges through the same delivery path as video, and use the same sharing-enabled, indexed-video, and filesystem reparse checks. A URL is limited to an associated scanned sidecar filename; it is not a general filesystem endpoint. Disabling sharing, removing/filtering out the video, or rescanning after subtitle removal revokes access.
+
+The first implementation accepts nonempty SRTs up to 16 MiB and associates at most 32 per video. It skips hidden/system/reparse entries and unmatched names. It sends or copies the bytes unchanged, so UTF-8 is recommended. It does not yet convert encodings, edit subtitle timing, search/download captions, expose a global language preference, or support external ASS/VTT sidecars. Native playback styling belongs to the client; server style controls apply to burn-in. Network metadata, delivery and actual burn-in have automated checks; physical Roku/Android subtitle selection remains to test.
 
 ## What the activity window tells you
 

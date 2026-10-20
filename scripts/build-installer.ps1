@@ -20,7 +20,7 @@ foreach ($file in @('launch-helper.ps1','pick-path.ps1','import-icon.ps1','confi
 }
 Copy-Item -LiteralPath (Join-Path $root 'build\package\vlc\library_share.lua') -Destination (Join-Path $stage 'vlc')
 [IO.Compression.ZipFile]::CreateFromDirectory($stage,$zip,[IO.Compression.CompressionLevel]::Optimal,$false)
-$installer = Join-Path $dist 'LibraryShare-0.3.0-alpha.1-Setup.exe'
+$installer = Join-Path $dist 'LibraryShare-0.3.0-alpha.2-Setup.exe'
 & $compiler /nologo /target:winexe /platform:x64 /optimize+ "/out:$installer" "/win32manifest:$(Join-Path $root 'src\LibraryShare.Setup\setup.manifest')" "/resource:$zip,LibraryShare.Payload.zip" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll (Join-Path $root 'src\LibraryShare.Setup\Setup.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Setup compilation failed.' }
 $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash

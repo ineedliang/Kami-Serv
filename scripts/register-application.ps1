@@ -12,7 +12,7 @@ foreach ($file in @('launch-helper.ps1','pick-path.ps1','import-icon.ps1','confi
 }
 $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Library Share'
 $desktop = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Library Share.lnk'
-@{ Product='LibraryShare'; Version='0.3.0-alpha.1'; Root=$root; ExtensionDirectory=$runtime.ExtensionDirectory; Files=$files;
+@{ Product='LibraryShare'; Version='0.3.0-alpha.2'; Root=$root; ExtensionDirectory=$runtime.ExtensionDirectory; Files=$files;
     Registered=(-not $SkipRegistration); DesktopShortcut=[bool]$DesktopShortcut } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'installed-files.json') -Encoding UTF8
 if ($SkipRegistration) { return }
 $powershell = Join-Path $PSHOME 'powershell.exe'
@@ -32,7 +32,7 @@ foreach ($path in $shortcutPaths) {
 $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\Microsoft\Windows\CurrentVersion\Uninstall\LibraryShare')
 try {
     $key.SetValue('DisplayName','Library Share for VLC (alpha)')
-    $key.SetValue('DisplayVersion','0.3.0-alpha.1')
+    $key.SetValue('DisplayVersion','0.3.0-alpha.2')
     $key.SetValue('Publisher','Library Share Project')
     $key.SetValue('InstallLocation',$root)
     $key.SetValue('DisplayIcon',(Join-Path $runtime.VlcDirectory 'vlc.exe'))

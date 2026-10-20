@@ -20,9 +20,13 @@ public static class Upnp
     private static readonly XNamespace Didl = "urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/";
     private static readonly XNamespace Dc = "http://purl.org/dc/elements/1.1/";
     private static readonly XNamespace Metadata = "urn:schemas-upnp-org:metadata-1-0/upnp/";
+    private static readonly XNamespace Samsung = "http://www.sec.co.kr/";
+    private static readonly XNamespace Pv = "http://www.pv.com/pvns/";
 
     public static string Protocol(string mime) => $"http-get:*:{mime}:{Features}";
-    public static string Protocols => string.Join(',', Library.Formats.Values.Select(v => v.Mime).Distinct().Select(Protocol));
+    public static string Protocols => string.Join(',', Library.Formats.Values.Select(v => v.Mime).Distinct().Select(Protocol).Append("http-get:*:text/srt:*"));
+    public static string SubtitleUrl(string baseUrl, MediaEntry video, SubtitleFile subtitle) =>
+        $"{baseUrl}/media/{video.Id}/{Uri.EscapeDataString(subtitle.Name)}";
     public static string Xml(XElement element) => "<?xml version=\"1.0\" encoding=\"utf-8\"?>" + element.ToString(SaveOptions.DisableFormatting);
 
     public static string Description(ShareConfig config) => Xml(new XElement(Device + "root",
@@ -138,7 +142,8 @@ public static class Upnp
                 var page = browseFlag == "BrowseMetadata" ? all : all.Skip((int)Math.Min(start, int.MaxValue))
                     .Take(count == 0 ? int.MaxValue : (int)Math.Min(count, int.MaxValue)).ToArray();
                 Out("Result", new XElement(Didl + "DIDL-Lite", new XAttribute(XNamespace.Xmlns + "dc", Dc),
-                    new XAttribute(XNamespace.Xmlns + "upnp", Metadata), page.Select(e => DidlEntry(e, snapshot, baseUrl))).ToString(SaveOptions.DisableFormatting));
+                    new XAttribute(XNamespace.Xmlns + "upnp", Metadata), new XAttribute(XNamespace.Xmlns + "sec", Samsung),
+                    new XAttribute(XNamespace.Xmlns + "pv", Pv), page.Select(e => DidlEntry(e, snapshot, baseUrl))).ToString(SaveOptions.DisableFormatting));
                 Out("NumberReturned", page.Length); Out("TotalMatches", all.Length); Out("UpdateID", snapshot.UpdateId);
                 break;
             case "GetSearchCapabilities" when service == "content": Out("SearchCaps", ""); break;
@@ -161,8 +166,22 @@ public static class Upnp
             new XAttribute("id", entry.Id), new XAttribute("parentID", entry.Parent), new XAttribute("restricted", "1"),
             new XElement(Dc + "title", entry.Title), new XElement(Metadata + "class", entry.MediaClass));
         if (entry.IsFolder) element.Add(new XAttribute("childCount", snapshot.Entries.Values.Count(e => e.Parent == entry.Id)));
-        else element.Add(new XElement(Didl + "res", new XAttribute("protocolInfo", Protocol(entry.Mime!)),
-            new XAttribute("size", entry.Size), $"{baseUrl}/media/{entry.Id}/{Uri.EscapeDataString(entry.Title)}"));
+        else
+        {
+            var resource = new XElement(Didl + "res", new XAttribute("protocolInfo", Protocol(entry.Mime!)),
+                new XAttribute("size", entry.Size), $"{baseUrl}/media/{entry.Id}/{Uri.EscapeDataString(entry.Title)}");
+            element.Add(resource);
+            if (entry.Subtitles.Length > 0)
+            {
+                var primary = SubtitleUrl(baseUrl, entry, entry.Subtitles[0]);
+                resource.Add(new XAttribute(Pv + "subtitleFileUri", primary), new XAttribute(Pv + "subtitleFileType", "srt"));
+                element.Add(new XElement(Samsung + "CaptionInfoEx", new XAttribute(Samsung + "type", "srt"), primary));
+                element.Add(new XElement(Samsung + "CaptionInfo", new XAttribute(Samsung + "type", "srt"), primary));
+                foreach (var subtitle in entry.Subtitles)
+                    element.Add(new XElement(Didl + "res", new XAttribute("protocolInfo", "http-get:*:text/srt:*"),
+                        new XAttribute("size", subtitle.Size), new XAttribute("language", subtitle.Language), SubtitleUrl(baseUrl, entry, subtitle)));
+            }
+        }
         return element;
     }
 
